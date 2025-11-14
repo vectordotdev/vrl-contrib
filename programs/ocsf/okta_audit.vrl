@@ -1,0 +1,114 @@
+# VRL program to normalize
+#   from: Okta audit log
+#   to: OCSF 1.6.0
+
+ocsf = {"metadata": {"uid": del(.uuid) || uuid_v7(),
+                     "version": "1.6.0",
+                     "product": {"vendor_name": "Okta",
+                                 "name": "Okta System Log"},
+                     "profiles": ["datetime"]},
+        "category_uid": 3,
+        "category_name": "Identity & Access Management",
+        "class_uid": 3002,
+        "class_name": "Authentication"}
+
+ocsf.time_dt = del(.published)
+ts = parse_timestamp(ocsf.time_dt, format: "%+") ?? now()
+ocsf.time = to_unix_timestamp(ts)
+
+activity = del(.eventType)
+
+if (!is_null(activity)) {
+    if (is_string(activity) && contains(string!(activity), "user.authentication")) {
+        ocsf.activity_id = 1
+        ocsf.activity_name = "Logon"
+        ocsf.type_uid = 300201
+        ocsf.type_name = "Authentication: Login"
+    } else {
+        ocsf.type_uid = 300299
+        ocsf.type_name = "Authentication: Other"
+        ocsf.activity_name = activity
+        ocsf.activity_id = 99
+    }
+} else {
+  ocsf.type_uid = 300201
+  ocsf.type_name = "Authentication: Logon"
+}
+
+ocsf.auth_protocol = del(.authenticationContext.authenticationProvider)
+
+if (is_null(ocsf.auth_protocol)) {
+    ocsf.auth_protocol = del(.debugContext.debugData.signOnMode)
+}
+
+if (is_null(ocsf.auth_protocol)) {
+    ocsf.auth_protocol = "Unknown"
+    ocsf.auth_protocol_id = 0
+} else if ( ocsf.auth_protocol == "FTP" || ocsf.auth_protocol == "TELNET" ) {
+    ocsf.auth_protocol_id = 0
+    ocsf.is_cleartext = true
+} else if (ocsf.auth_protocol == "SAML 2.0") {
+    ocsf.auth_protocol = "SAML"
+    ocsf.auth_protocol_id = 5
+    ocsf.is_cleartext = false
+} else if (contains(string!(ocsf.auth_protocol), "FACTOR")) {
+    ocsf.auth_protocol = "Other / MFA"
+    ocsf.auth_protocol_id = 99
+    ocsf.is_cleartext = false
+} else {
+    ocsf.auth_protocol_id = 0
+}
+
+if (!is_null(.client.geographicalContext)) {
+  ocsf.enrichments = [{"name": "geographicalContext",
+                       "type": "location",
+                       "data": encode_json(del(.client.geographicalContext)),
+                       "value": del(.client.ipAddress)}]
+}
+
+ocsf.logon_type = del(.transaction.type)
+
+if (ocsf.logon_type == "WEB") {
+    ocsf.logon_type_id = 99
+}
+ocsf.message = del(.displayMessage)
+
+ocsf.session = {"uid": del(.authenticationContext.externalSessionId)}
+
+ocsf.severity = del(.severity)
+
+if (ocsf.severity == "INFO") {
+    ocsf.severity_id = 1
+    ocsf.severity = "Informational"
+} else if (!is_null(ocsf.severity)) {
+    ocsf.severity_id = 0
+}
+
+ocsf.src_endpoint = {"ip": del(.client.ipAddress),
+                     "interface_uid": del(.client.id) || del(.client.device)}
+
+ocsf.dst_endpoint = { "hostname": del(.debugContext.debugData.issuer) || del(.debugContext.debugData.redirectUri),
+                      "svc_name": del(.debugContext.debugData.url)}
+
+ocsf.user = {"uid": del(.actor.id),
+             "type": del(.actor.type),
+             "name": del(.actor.displayName),
+             "uid_alt": del(.actor.alternateId)}
+
+if (!is_null(ocsf.user.uid_alt) && is_string(ocsf.user.uid_alt) && contains(string!(ocsf.user.uid_alt), "@")) {
+  ocsf.user.email_addr = ocsf.user.uid_alt
+}
+
+ocsf.status = del(.outcome.result)
+ocsf.status_code = "N/A"
+ocsf.status_id = 0
+
+if (ocsf.status == "SUCCESS") {
+    ocsf.status = "Success"
+    ocsf.status_detail = activity || "LOGON_USER_INITIATED"
+    ocsf.status_id = 1
+}
+
+ocsf.unmapped = compact(., string: true, array: true, null: true, nullish: true)
+
+. = compact(ocsf, string: true, array: true, null: true, nullish: true)

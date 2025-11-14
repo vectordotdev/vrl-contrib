@@ -1,0 +1,126 @@
+# VRL program to normalize
+#   from: Github webhook & Github Enterprise audit log
+#   to: OCSF 1.6.0
+# 
+# NOTE:
+#  Github webhooks store meaningful information
+#  in the x-github-* headers
+#
+#  This remap assumes data from a Vector `http_server` source,
+#  with the `headers` option including `x-github-*` (or
+#  any other matching wildcard)
+#
+#  If this is not the case, you'll need to coerce the relevant
+#  headers in to %http_server.headers (eg, Event.metadata_full)
+#
+#  Github Enterprise Audit Log streaming does not, the event type
+#  is stored in the 'action' field
+#
+#  This program attempts to handle both types of event
+
+xgithubevent = %http_server.headers."x-github-event"
+
+ocsf = {"metadata": {"version": "1.6.0",
+                     "product": {"vendor_name":"Github",
+                                 "name": "audit"},
+                     "profiles": ["cloud","datetime"]},
+        "category_uid": 6,
+        "category_name": "Application Activity",
+        "class_uid": 6003,
+        "class_name": "API Activity",
+        "severity_id": 1,
+        "severity": "Informational"}
+
+ocsf.metadata.uid = del(._document_id)
+ocsf.metadata.logged_time = del(.created_at)
+
+ocsf.time = del(."@timestamp") || to_unix_timestamp(now())
+
+op = del(.operation_type) || xgithubevent
+operation_type, _ = to_string(op)
+
+if operation_type == "create" {
+  ocsf.activity_id = 1
+  ocsf.activity_name = "Create"
+} else if (operation_type == "access" || .action == "git.clone" || .action == "git.fetch") {
+  ocsf.activity_id = 2
+  ocsf.activity_name = "Read"
+} else if operation_type == "modify" {
+  ocsf.activity_id = 3
+  ocsf.activity_name = "Update"
+} else if operation_type == "remove" {
+  ocsf.activity_id = 3
+  ocsf.activity_name = "Delete"
+} else if (is_nullish(operation_type) && is_null(.action))  {
+  ocsf.activity_id = 0
+  ocsf.activity_name = "Unknown"
+} else {
+  ocsf.activity_id = 99
+  if !is_nullish(operation_type) {
+    if (!is_null(.action) && is_string(.action)) {
+      ocsf.activity_name = operation_type + "." + to_string!(.action)
+    } else {
+      ocsf.activity_name = operation_type
+    }
+  } else {
+    ocsf.activity_name = .action || "Other"
+  }
+}
+
+ocsf.type_uid = ocsf.class_uid * 100 + ocsf.activity_id
+if (ocsf.activity_id == 99) {
+    ocsf.type_name = "API Activity: Other"
+} else {
+    ocsf.type_name, _ = join([ocsf.class_name, ocsf.activity], separator: ": ")
+}
+
+ocsf.api = {"operation": del(.action) || ocsf.activity_name,
+             "service": {"name": del(.repository.full_name) || del(.repository)},
+             "group": {"name": xgithubevent}}
+
+
+public = to_bool(del(.repository_public)) ?? false
+if (public) {
+    ocsf.api.service.labels = ["public"]
+}
+
+ocsf.cloud = {"provider": "Github",
+              "account": {"uid": to_string(del(.business_id)) ?? null,
+                          "name": del(.business)},
+              "org": {"name": del(.org),
+                      "uid": to_string(del(.org_id)) ?? null}}
+
+is_bot = to_bool(del(.actor_is_bot)) ?? false
+
+if (is_bot) {
+  ocsf.actor = {"user": {"type": "System", "type_id": 3}}
+} else {
+  ocsf.actor = {"user": {"type": "github", "type_id": 99}}
+}
+
+uid_alt = del(.actor_id) || del(.sender.id)
+
+ocsf.actor.user.uid_alt, _ = to_string(uid_alt)
+ocsf.actor.user.email_addr = del(.pusher.email) || del(.external_identity_nameid) || del(.external_identity_username)
+ocsf.actor.user.full_name = del(.pusher.name)
+ocsf.actor.user.uid = del(.actor) || del(.user.login) || del(.sender.login)
+
+ocsf.actor.session = {"issuer": del(.programmatic_access_type),
+                      "credential_uid": to_string(del(.token_id)) ?? null}
+
+ocsf.http_request = {"user_agent": del(.user_agent)}
+
+ocsf.src_endpoint = {"location": {"country": del(.actor_location.country_code)}, "ip": del(.actor_ip)}
+
+if (is_null(ocsf.src_endpoint.ip)) {
+  ocsf.src_endpoint.uid = "unknown"
+}
+
+if (!is_null(.repo)) {
+  repo, _ = to_string(del(.repo))
+  ocsf.resources = [{"name": repo, "type": "repository"}]
+}
+
+ocsf.unmapped = compact(., string: true, array: true, null: true, nullish: true)
+
+. = compact(ocsf, string: true, array: true, null: true, nullish: true, recursive: true)
